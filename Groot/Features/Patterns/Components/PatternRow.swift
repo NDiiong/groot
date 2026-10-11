@@ -44,7 +44,7 @@ struct PatternRow: View {
             }
             Button("Cancel", role: .cancel) { }
         } message: {
-            Text("This pattern will no longer block matching numbers.")
+            Text("This pattern will no longer match any numbers.")
         }
     }
     
@@ -75,6 +75,14 @@ struct PatternRow: View {
             
             HStack(spacing: 8) {
                 StatusBadge(isEnabled: pattern.isEnabled)
+                
+                Text(pattern.blocksCalls ? "block" : "label")
+                    .font(.system(size: 11, weight: .semibold, design: .rounded))
+                    .foregroundStyle(pattern.blocksCalls ? Color.grootFlame : Color.grootViolet)
+                
+                Text("≈\(pattern.expandedCount.formatted())")
+                    .font(.system(size: 11, weight: .medium, design: .rounded))
+                    .foregroundStyle(Color.grootStone)
                 
                 if pattern.matchCount > 0 {
                     Text("•")
@@ -147,8 +155,8 @@ struct StatusBadge: View {
     VStack(spacing: 0) {
         PatternRow(
             pattern: BlockPattern(
-                pattern: "+1800*",
-                description: "Toll-free 1-800 numbers",
+                pattern: "+37529123####",
+                description: "Suspected scam",
                 matchCount: 42,
                 isEnabled: true
             ),
@@ -160,8 +168,8 @@ struct StatusBadge: View {
         
         PatternRow(
             pattern: BlockPattern(
-                pattern: "+1900*",
-                description: "Premium rate numbers",
+                pattern: "+3816012#####",
+                description: "Suspected scam",
                 matchCount: 0,
                 isEnabled: false
             ),

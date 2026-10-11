@@ -88,38 +88,18 @@ class CallDirectoryHandler: CXCallDirectoryProvider {
     
     // MARK: - Blocking Phone Numbers
     
-    /// Add all blocked phone numbers (full reload)
     private func addAllBlockingPhoneNumbers(to context: CXCallDirectoryExtensionContext) {
-        guard let modelContext = modelContext else { return }
-        
-        // Fetch all data needed for blocking
-        let blockedNumbers = fetchAllBlockedNumbers()
-        let whitelistedNumbers = fetchWhitelistedPhoneNumbers()
-        let blockedCountries = fetchBlockedCountries()
-        let patterns = fetchActivePatterns()
-        
-        // Collect all numbers to block, excluding whitelisted ones
-        var numbersToBlock: Set<Int64> = []
-        
-        // Add explicitly blocked numbers
-        for blocked in blockedNumbers {
-            if let numeric = blocked.numericPhoneNumber,
-               !whitelistedNumbers.contains(numeric) {
-                numbersToBlock.insert(numeric)
-            }
+        guard modelContext != nil else { return }
+        let whitelisted = fetchWhitelistedPhoneNumbers()
+        let explicit = fetchAllBlockedNumbers().compactMap { blocked -> PhoneEntry? in
+            guard let numeric = blocked.numericPhoneNumber else { return nil }
+            return PhoneEntry(number: numeric, label: "")
         }
-        
-        // Note: For country blocking, we would need a database of known numbers
-        // from those countries, which is impractical. Instead, we rely on
-        // the identification feature to label calls from blocked countries
-        // and the app can notify users.
-        
-        // Sort numbers in ascending order (required by CallKit)
-        let sortedNumbers = numbersToBlock.sorted()
-        
-        // Add blocking entries
-        for number in sortedNumbers {
-            context.addBlockingEntry(withNextSequentialPhoneNumber: number)
+        let patterns = cappedPatterns(fetchActivePatterns()).filter { $0.blocksCalls }
+        var merged = SortedPhoneEntryMerge(sources: [explicitSource(explicit)] + patterns.compactMap { patternSource($0) })
+        while let entry = merged.next() {
+            if whitelisted.contains(entry.number) { continue }
+            context.addBlockingEntry(withNextSequentialPhoneNumber: entry.number)
         }
     }
     
@@ -133,32 +113,51 @@ class CallDirectoryHandler: CXCallDirectoryProvider {
     
     // MARK: - Identification Phone Numbers
     
-    /// Add all identification entries (for caller ID labels)
     private func addAllIdentificationPhoneNumbers(to context: CXCallDirectoryExtensionContext) {
-        guard let modelContext = modelContext else { return }
-        
-        // Fetch blocked numbers that have labels
-        let blockedNumbers = fetchAllBlockedNumbers()
-        
-        // Collect numbers with identification labels
-        var numbersWithLabels: [(Int64, String)] = []
-        
-        for blocked in blockedNumbers {
-            if let numeric = blocked.numericPhoneNumber {
-                let label = blocked.label ?? blocked.reason.displayName
-                numbersWithLabels.append((numeric, label))
-            }
+        guard modelContext != nil else { return }
+        let whitelisted = fetchWhitelistedPhoneNumbers()
+        let explicit = fetchAllBlockedNumbers().compactMap { blocked -> PhoneEntry? in
+            guard let numeric = blocked.numericPhoneNumber else { return nil }
+            return PhoneEntry(number: numeric, label: blocked.label ?? blocked.reason.displayName)
         }
-        
-        // Sort by phone number (required by CallKit)
-        numbersWithLabels.sort { $0.0 < $1.0 }
-        
-        // Add identification entries
-        for (number, label) in numbersWithLabels {
-            context.addIdentificationEntry(
-                withNextSequentialPhoneNumber: number,
-                label: label
-            )
+        let patterns = cappedPatterns(fetchActivePatterns()).filter { !$0.blocksCalls }
+        var merged = SortedPhoneEntryMerge(sources: [explicitSource(explicit)] + patterns.compactMap { patternSource($0) })
+        while let entry = merged.next() {
+            if whitelisted.contains(entry.number) { continue }
+            context.addIdentificationEntry(withNextSequentialPhoneNumber: entry.number, label: entry.label)
+        }
+    }
+    
+    private func cappedPatterns(_ patterns: [BlockPattern]) -> [BlockPattern] {
+        var total: Int64 = 0
+        var result: [BlockPattern] = []
+        for pattern in patterns.sorted(by: { $0.createdAt < $1.createdAt }) {
+            guard BlockPattern.normalize(pattern.pattern) != nil else { continue }
+            let count = pattern.expandedCount
+            if total + count > BlockPattern.maxTotalNumbers { continue }
+            total += count
+            result.append(pattern)
+        }
+        return result
+    }
+    
+    private func explicitSource(_ entries: [PhoneEntry]) -> () -> PhoneEntry? {
+        let sorted = entries.sorted { $0.number < $1.number }
+        var index = 0
+        return {
+            guard index < sorted.count else { return nil }
+            defer { index += 1 }
+            return sorted[index]
+        }
+    }
+    
+    private func patternSource(_ pattern: BlockPattern) -> (() -> PhoneEntry?)? {
+        guard let normalized = BlockPattern.normalize(pattern.pattern),
+              var sequence = PatternNumberSequence(template: normalized) else { return nil }
+        let label = pattern.patternDescription.isEmpty ? BlockReason.pattern.displayName : pattern.patternDescription
+        return {
+            guard let number = sequence.next() else { return nil }
+            return PhoneEntry(number: number, label: label)
         }
     }
     
@@ -224,6 +223,81 @@ class CallDirectoryHandler: CXCallDirectoryProvider {
         } catch {
             print("Failed to fetch patterns: \(error)")
             return []
+        }
+    }
+}
+
+// MARK: - Pattern Expansion
+
+struct PhoneEntry {
+    let number: Int64
+    let label: String
+}
+
+struct PatternNumberSequence {
+    private let base: Int64
+    private let weights: [Int64]
+    private let total: Int64
+    private var counter: Int64 = 0
+    
+    init?(template: String) {
+        var base: Int64 = 0
+        var weights: [Int64] = []
+        var place: Int64 = 1
+        for character in template.reversed() {
+            if character == "#" {
+                weights.append(place)
+            } else if let digit = character.wholeNumberValue {
+                base += Int64(digit) * place
+            } else {
+                return nil
+            }
+            place *= 10
+        }
+        guard !weights.isEmpty else { return nil }
+        var total: Int64 = 1
+        for _ in weights { total *= 10 }
+        self.base = base
+        self.weights = weights
+        self.total = total
+    }
+    
+    mutating func next() -> Int64? {
+        guard counter < total else { return nil }
+        var remaining = counter
+        var value = base
+        for weight in weights {
+            value += (remaining % 10) * weight
+            remaining /= 10
+        }
+        counter += 1
+        return value
+    }
+}
+
+struct SortedPhoneEntryMerge {
+    private let sources: [() -> PhoneEntry?]
+    private var heads: [PhoneEntry?]
+    private var lastNumber: Int64?
+    
+    init(sources: [() -> PhoneEntry?]) {
+        self.sources = sources
+        self.heads = sources.map { $0() }
+    }
+    
+    mutating func next() -> PhoneEntry? {
+        while true {
+            var selected: Int?
+            for index in heads.indices {
+                guard let head = heads[index] else { continue }
+                if let current = selected, let currentHead = heads[current], currentHead.number <= head.number { continue }
+                selected = index
+            }
+            guard let index = selected, let entry = heads[index] else { return nil }
+            heads[index] = sources[index]()
+            if entry.number == lastNumber { continue }
+            lastNumber = entry.number
+            return entry
         }
     }
 }
