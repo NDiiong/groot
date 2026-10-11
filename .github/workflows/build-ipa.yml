@@ -1,0 +1,58 @@
+name: Build unsigned IPA
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: macos-26
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show Xcode version
+        run: xcodebuild -version
+
+      - name: Build app
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project Groot.xcodeproj \
+            -target Groot \
+            -configuration Release \
+            -sdk iphoneos \
+            SYMROOT="$PWD/build" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build
+
+      - name: Verify app and extension
+        run: |
+          APP=build/Release-iphoneos/Groot.app
+          test -d "$APP"
+          test -d "$APP/PlugIns/GrootCallDirectory.appex"
+          ls -la "$APP/PlugIns"
+
+      - name: Embed entitlements
+        run: |
+          APP=build/Release-iphoneos/Groot.app
+          codesign -f -s - --entitlements GrootCallDirectory/GrootCallDirectory.entitlements "$APP/PlugIns/GrootCallDirectory.appex"
+          codesign -f -s - --entitlements Groot/Groot.entitlements "$APP"
+          codesign -d --entitlements - "$APP/PlugIns/GrootCallDirectory.appex"
+          codesign -d --entitlements - "$APP"
+
+      - name: Package IPA
+        run: |
+          mkdir -p dist/Payload
+          cp -R build/Release-iphoneos/Groot.app dist/Payload/
+          cd dist
+          zip -qry Groot-unsigned.ipa Payload
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Groot-unsigned-ipa
+          path: dist/Groot-unsigned.ipa
+          if-no-files-found: error
