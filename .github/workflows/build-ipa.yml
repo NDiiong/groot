@@ -4,55 +4,104 @@ on:
   workflow_dispatch:
   push:
     branches: [main]
+    tags: ['v*']
+
+permissions:
+  contents: read
 
 jobs:
   build:
     runs-on: macos-26
     timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v4
 
-      - name: Show Xcode version
-        run: xcodebuild -version
-
-      - name: Build app
+      - name: Build Groot for iPhone
         run: |
-          set -o pipefail
+          xcodebuild -version
           xcodebuild \
             -project Groot.xcodeproj \
             -target Groot \
             -configuration Release \
             -sdk iphoneos \
-            SYMROOT="$PWD/build" \
+            CONFIGURATION_BUILD_DIR="$RUNNER_TEMP/groot-products" \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
             build
 
-      - name: Verify app and extension
+      - name: Ad-hoc sign the extension and app with their entitlements
         run: |
-          APP=build/Release-iphoneos/Groot.app
-          test -d "$APP"
-          test -d "$APP/PlugIns/GrootCallDirectory.appex"
-          ls -la "$APP/PlugIns"
+          app="$RUNNER_TEMP/groot-products/Groot.app"
+          extension="$app/PlugIns/GrootCallDirectory.appex"
+          for bundle in "$app" "$extension"; do
+            if [[ ! -f "$bundle/Info.plist" ]]; then
+              echo "::error::Missing bundle or Info.plist at $bundle"
+              exit 1
+            fi
+          done
 
-      - name: Embed entitlements
+          codesign --force --sign - --entitlements GrootCallDirectory/GrootCallDirectory.entitlements "$extension"
+          codesign --force --sign - --entitlements Groot/Groot.entitlements "$app"
+          codesign --verify --strict "$extension"
+          codesign --verify --strict "$app"
+
+      - name: Package and verify the IPA
         run: |
-          APP=build/Release-iphoneos/Groot.app
-          codesign -f -s - --entitlements GrootCallDirectory/GrootCallDirectory.entitlements "$APP/PlugIns/GrootCallDirectory.appex"
-          codesign -f -s - --entitlements Groot/Groot.entitlements "$APP"
-          codesign -d --entitlements - "$APP/PlugIns/GrootCallDirectory.appex"
-          codesign -d --entitlements - "$APP"
+          staging="$(mktemp -d "$RUNNER_TEMP/groot-ipa.XXXXXX")"
+          mkdir "$staging/Payload"
+          ditto "$RUNNER_TEMP/groot-products/Groot.app" "$staging/Payload/Groot.app"
+          ipa="$RUNNER_TEMP/Groot-unsigned.ipa"
+          (cd "$staging" && zip -qry "$ipa" Payload)
+          unzip -tq "$ipa"
+          for bundle in Payload/Groot.app Payload/Groot.app/PlugIns/GrootCallDirectory.appex; do
+            executable=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$staging/$bundle/Info.plist")
+            unzip -Z1 "$ipa" "$bundle/Info.plist"
+            unzip -Z1 "$ipa" "$bundle/$executable"
+          done
 
-      - name: Package IPA
-        run: |
-          mkdir -p dist/Payload
-          cp -R build/Release-iphoneos/Groot.app dist/Payload/
-          cd dist
-          zip -qry Groot-unsigned.ipa Payload
-
-      - uses: actions/upload-artifact@v4
+      - name: Upload Groot-unsigned.ipa
+        uses: actions/upload-artifact@v7
         with:
-          name: Groot-unsigned-ipa
-          path: dist/Groot-unsigned.ipa
+          path: ${{ runner.temp }}/Groot-unsigned.ipa
+          archive: false
           if-no-files-found: error
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v') && !github.event.deleted
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    concurrency:
+      group: groot-release-${{ github.ref }}
+      cancel-in-progress: false
+    steps:
+      - name: Download the verified IPA
+        uses: actions/download-artifact@v8
+        with:
+          name: Groot-unsigned.ipa
+          path: release
+          skip-decompress: true
+
+      - name: Publish IPA to GitHub Releases
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          ipa=release/Groot-unsigned.ipa
+          test -s "$ipa"
+          unzip -tq "$ipa"
+
+          if has_ipa=$(gh release view "$GITHUB_REF_NAME" --json assets \
+            --jq 'any(.assets[]; .name == "Groot-unsigned.ipa")'); then
+            if [[ "$has_ipa" == false ]]; then
+              gh release upload "$GITHUB_REF_NAME" "$ipa"
+            fi
+          else
+            gh release create "$GITHUB_REF_NAME" "$ipa" --verify-tag --generate-notes
+          fi
