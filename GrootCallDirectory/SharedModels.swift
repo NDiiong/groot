@@ -217,69 +217,60 @@ final class BlockPattern {
     var createdAt: Date
     var matchCount: Int
     var isEnabled: Bool
+    var blocksCalls: Bool = false
     
     init(
         pattern: String,
         description: String,
         createdAt: Date = Date(),
         matchCount: Int = 0,
-        isEnabled: Bool = true
+        isEnabled: Bool = true,
+        blocksCalls: Bool = false
     ) {
         self.pattern = pattern
         self.patternDescription = description
         self.createdAt = createdAt
         self.matchCount = matchCount
         self.isEnabled = isEnabled
+        self.blocksCalls = blocksCalls
     }
-    
+}
+
+extension BlockPattern {
+    static let maxWildcards = 6
+    static let maxTotalNumbers: Int64 = 2_000_000
+
+    static func normalize(_ raw: String) -> String? {
+        let allowed: Set<Character> = ["+", " ", "-", "(", ")", "#"]
+        guard raw.allSatisfy({ ($0.isASCII && $0.isNumber) || allowed.contains($0) }) else { return nil }
+        let cleaned = raw.filter { ($0.isASCII && $0.isNumber) || $0 == "#" }
+        guard let first = cleaned.first, first != "#", (7...15).contains(cleaned.count) else { return nil }
+        let wildcards = cleaned.filter { $0 == "#" }.count
+        guard (1...maxWildcards).contains(wildcards) else { return nil }
+        return cleaned
+    }
+
+    static func wildcardCount(in raw: String) -> Int {
+        raw.filter { $0 == "#" }.count
+    }
+
+    static func expandedCount(of raw: String) -> Int64 {
+        var total: Int64 = 1
+        for _ in 0..<wildcardCount(in: raw) {
+            total *= 10
+        }
+        return total
+    }
+
+    var expandedCount: Int64 {
+        BlockPattern.expandedCount(of: pattern)
+    }
+
     func matches(_ phoneNumber: String) -> Bool {
         guard isEnabled else { return false }
-        
-        let normalizedNumber = phoneNumber.replacingOccurrences(of: "+", with: "")
-            .filter { $0.isNumber }
-        let normalizedPattern = pattern.replacingOccurrences(of: "+", with: "")
-            .filter { $0.isNumber || $0 == "*" }
-        
-        return matchesPattern(number: normalizedNumber, pattern: normalizedPattern)
-    }
-    
-    private func matchesPattern(number: String, pattern: String) -> Bool {
-        var numberIndex = number.startIndex
-        var patternIndex = pattern.startIndex
-        
-        while patternIndex < pattern.endIndex {
-            let patternChar = pattern[patternIndex]
-            
-            if patternChar == "*" {
-                let nextPatternIndex = pattern.index(after: patternIndex)
-                if nextPatternIndex == pattern.endIndex {
-                    return true
-                }
-                
-                while numberIndex <= number.endIndex {
-                    if matchesPattern(
-                        number: String(number[numberIndex...]),
-                        pattern: String(pattern[nextPatternIndex...])
-                    ) {
-                        return true
-                    }
-                    if numberIndex < number.endIndex {
-                        numberIndex = number.index(after: numberIndex)
-                    } else {
-                        break
-                    }
-                }
-                return false
-            } else {
-                if numberIndex >= number.endIndex || number[numberIndex] != patternChar {
-                    return false
-                }
-                numberIndex = number.index(after: numberIndex)
-            }
-            
-            patternIndex = pattern.index(after: patternIndex)
-        }
-        
-        return numberIndex == number.endIndex
+        let number = phoneNumber.filter { $0.isASCII && $0.isNumber }
+        let template = pattern.filter { ($0.isASCII && $0.isNumber) || $0 == "#" }
+        guard number.count == template.count else { return false }
+        return zip(number, template).allSatisfy { $1 == "#" || $0 == $1 }
     }
 }

@@ -49,7 +49,9 @@ struct PatternsView: View {
                         patternsListSection
                     }
                     
-                    suggestedPatternsSection
+                    if !availableSuggestions.isEmpty {
+                        suggestedPatternsSection
+                    }
                     
                     infoCallout
                 }
@@ -207,7 +209,7 @@ struct PatternsView: View {
     private var infoCallout: some View {
         GrootCallout(
             title: "how patterns work",
-            message: "Patterns use * as a wildcard to match any digits. For example, +1800* blocks all 1-800 numbers.",
+            message: "Use # for each unknown digit. For example, +37529123#### matches 10,000 numbers. Maximum 6 # per pattern and 2,000,000 numbers across active patterns.",
             icon: "lightbulb.fill",
             color: .grootSun
         )
@@ -528,7 +530,7 @@ struct PatternsTabView: View {
     private var infoCallout: some View {
         GrootCallout(
             title: "how patterns work",
-            message: "Patterns use * as a wildcard to match any digits. For example, +1800* blocks all 1-800 numbers.",
+            message: "Use # for each unknown digit. For example, +37529123#### matches 10,000 numbers. Maximum 6 # per pattern and 2,000,000 numbers across active patterns.",
             icon: "lightbulb.fill",
             color: .grootSun
         )

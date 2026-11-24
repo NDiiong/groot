@@ -15,6 +15,7 @@ struct AddPatternSheet: View {
     
     @State private var pattern = ""
     @State private var patternDescription = ""
+    @State private var blocksCalls = false
     @State private var isAdding = false
     @State private var errorMessage: String?
     
@@ -64,7 +65,7 @@ struct AddPatternSheet: View {
             
             GrootText("create pattern", style: .title)
             
-            Text("block numbers matching a specific pattern")
+            Text("use # for each unknown digit")
                 .font(.system(size: 14, weight: .regular, design: .rounded))
                 .foregroundStyle(Color.grootStone)
                 .multilineTextAlignment(.center)
@@ -81,10 +82,14 @@ struct AddPatternSheet: View {
                 
                 PatternTextField(
                     text: $pattern,
-                    placeholder: "+1800*",
+                    placeholder: "+37529123####",
                     isFocused: focusedField == .pattern
                 )
                 .focused($focusedField, equals: .pattern)
+                
+                Text(estimateText)
+                    .font(.system(size: 12, weight: .medium, design: .rounded))
+                    .foregroundStyle(Color.grootStone)
             }
             
             GrootTextField(
@@ -92,6 +97,18 @@ struct AddPatternSheet: View {
                 text: $patternDescription,
                 icon: "text.alignleft"
             )
+            
+            Toggle(isOn: $blocksCalls) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("block calls")
+                        .font(.system(size: 15, weight: .semibold, design: .rounded))
+                        .foregroundStyle(Color.grootBark)
+                    Text(blocksCalls ? "matching calls are rejected" : "matching calls ring with a scam warning label")
+                        .font(.system(size: 12, weight: .regular, design: .rounded))
+                        .foregroundStyle(Color.grootStone)
+                }
+            }
+            .tint(Color.grootViolet)
             
             if let error = errorMessage {
                 HStack(spacing: 6) {
@@ -125,29 +142,20 @@ struct AddPatternSheet: View {
             
             VStack(spacing: 8) {
                 PatternExampleRow(
-                    pattern: "+1800*",
-                    description: "All 1-800 toll-free numbers",
+                    pattern: "+37529123####",
+                    description: "4 unknown digits = 10,000 numbers",
                     onTap: {
-                        pattern = "+1800"
-                        patternDescription = "Toll-free 1-800 numbers"
+                        pattern = "+37529123####"
+                        patternDescription = "Suspected scam"
                     }
                 )
                 
                 PatternExampleRow(
-                    pattern: "+1*5551234",
-                    description: "Specific number from any area code",
+                    pattern: "+3816012#####",
+                    description: "5 unknown digits = 100,000 numbers",
                     onTap: {
-                        pattern = "+1*5551234"
-                        patternDescription = "Number 555-1234 from any area code"
-                    }
-                )
-                
-                PatternExampleRow(
-                    pattern: "+44*",
-                    description: "All numbers from UK (+44)",
-                    onTap: {
-                        pattern = "+44"
-                        patternDescription = "All UK numbers"
+                        pattern = "+3816012#####"
+                        patternDescription = "Suspected scam"
                     }
                 )
             }
@@ -160,7 +168,17 @@ struct AddPatternSheet: View {
     // MARK: - Computed Properties
     
     private var isValidPattern: Bool {
-        !pattern.isEmpty && !patternDescription.isEmpty
+        BlockPattern.normalize(pattern) != nil && !patternDescription.isEmpty
+    }
+    
+    private var estimateText: String {
+        if BlockPattern.wildcardCount(in: pattern) > BlockPattern.maxWildcards {
+            return "maximum \(BlockPattern.maxWildcards) # per pattern"
+        }
+        guard let normalized = BlockPattern.normalize(pattern) else {
+            return "digits and # only, 7-15 digits including country code"
+        }
+        return "≈ \(BlockPattern.expandedCount(of: normalized).formatted()) numbers"
     }
     
     // MARK: - Actions
@@ -169,19 +187,8 @@ struct AddPatternSheet: View {
         isAdding = true
         errorMessage = nil
         
-        // Normalize pattern - add + if needed
-        var normalizedPattern = pattern.trimmingCharacters(in: .whitespaces)
-        if !normalizedPattern.hasPrefix("+") && normalizedPattern.first?.isNumber == true {
-            normalizedPattern = "+" + normalizedPattern
-        }
-        
-        // Add wildcard if not present
-        if !normalizedPattern.contains("*") {
-            normalizedPattern += "*"
-        }
-        
         do {
-            try callBlockingService.addPattern(normalizedPattern, description: patternDescription)
+            try callBlockingService.addPattern(pattern, description: patternDescription, blocksCalls: blocksCalls)
             
             GrootHaptics.success()
             
@@ -219,10 +226,6 @@ struct PatternTextField: View {
                 .keyboardType(.phonePad)
             
             if !text.isEmpty {
-                Text("*")
-                    .font(.system(size: 20, weight: .bold, design: .monospaced))
-                    .foregroundStyle(Color.grootViolet)
-                
                 Button {
                     withAnimation(.grootSnappy) {
                         text = ""

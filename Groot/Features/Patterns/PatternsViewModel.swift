@@ -102,7 +102,7 @@ final class PatternsViewModel {
                 try? await callBlockingService.reloadCallDirectory()
             }
         } catch {
-            toastMessage = "Failed to toggle pattern"
+            toastMessage = error.localizedDescription
             showToast = true
             GrootHaptics.error()
         }

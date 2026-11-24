@@ -354,28 +354,35 @@ final class CallBlockingService {
     
     // MARK: - Patterns
     
-    /// Add a blocking pattern
-    func addPattern(_ pattern: String, description: String) throws {
+    func addPattern(_ pattern: String, description: String, blocksCalls: Bool = false) throws {
         guard let context = modelContext else {
             throw CallBlockingServiceError.notConfigured
         }
         
-        // Validate pattern format
-        guard pattern.contains("*") || PhoneNumberService.shared.isValidPhoneNumber(pattern) else {
+        if BlockPattern.wildcardCount(in: pattern) > BlockPattern.maxWildcards {
+            throw CallBlockingServiceError.patternTooBroad
+        }
+        guard let normalized = BlockPattern.normalize(pattern) else {
             throw CallBlockingServiceError.invalidPattern
         }
+        let storedPattern = "+" + normalized
         
-        // Check if already exists
         let descriptor = FetchDescriptor<BlockPattern>()
         let allPatterns = try context.fetch(descriptor)
         
-        guard !allPatterns.contains(where: { $0.pattern == pattern }) else {
+        guard !allPatterns.contains(where: { $0.pattern == storedPattern }) else {
             throw CallBlockingServiceError.alreadyExists
         }
         
+        let enabledTotal = allPatterns.filter { $0.isEnabled }.reduce(Int64(0)) { $0 + $1.expandedCount }
+        guard enabledTotal + BlockPattern.expandedCount(of: normalized) <= BlockPattern.maxTotalNumbers else {
+            throw CallBlockingServiceError.patternCapacityExceeded
+        }
+        
         let blockPattern = BlockPattern(
-            pattern: pattern,
-            description: description
+            pattern: storedPattern,
+            description: description,
+            blocksCalls: blocksCalls
         )
         context.insert(blockPattern)
         try context.save()
@@ -416,6 +423,12 @@ final class CallBlockingService {
         let allPatterns = try context.fetch(descriptor)
         
         if let blockPattern = allPatterns.first(where: { $0.pattern == pattern }) {
+            if !blockPattern.isEnabled {
+                let enabledTotal = allPatterns.filter { $0.isEnabled }.reduce(Int64(0)) { $0 + $1.expandedCount }
+                guard enabledTotal + blockPattern.expandedCount <= BlockPattern.maxTotalNumbers else {
+                    throw CallBlockingServiceError.patternCapacityExceeded
+                }
+            }
             blockPattern.isEnabled.toggle()
             try context.save()
             AppGroupContainer.markNeedsReload()
@@ -445,6 +458,8 @@ enum CallBlockingServiceError: LocalizedError {
     case notConfigured
     case invalidPhoneNumber
     case invalidPattern
+    case patternTooBroad
+    case patternCapacityExceeded
     case alreadyExists
     case notFound
     case extensionDisabled
@@ -456,7 +471,11 @@ enum CallBlockingServiceError: LocalizedError {
         case .invalidPhoneNumber:
             return "Invalid phone number format."
         case .invalidPattern:
-            return "Invalid pattern format. Use * as wildcard."
+            return "Invalid pattern. Use digits and # (one # per unknown digit), 7-15 digits total, e.g. +37529123####."
+        case .patternTooBroad:
+            return "Too many # in one pattern. Maximum is \(BlockPattern.maxWildcards)."
+        case .patternCapacityExceeded:
+            return "Active patterns would exceed \(BlockPattern.maxTotalNumbers.formatted()) numbers. Disable or remove a pattern first."
         case .alreadyExists:
             return "This entry already exists."
         case .notFound:

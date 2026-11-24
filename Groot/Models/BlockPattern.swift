@@ -12,8 +12,6 @@ import SwiftData
 /// Patterns use wildcards to match multiple numbers
 @Model
 final class BlockPattern {
-    /// The pattern string (e.g., "+1800*" to block all 1-800 numbers)
-    /// Supports * as wildcard for any digits
     @Attribute(.unique) var pattern: String
     
     /// Human-readable description of what this pattern blocks
@@ -27,19 +25,22 @@ final class BlockPattern {
     
     /// Whether this pattern is currently active
     var isEnabled: Bool
+    var blocksCalls: Bool = false
     
     init(
         pattern: String,
         description: String,
         createdAt: Date = Date(),
         matchCount: Int = 0,
-        isEnabled: Bool = true
+        isEnabled: Bool = true,
+        blocksCalls: Bool = false
     ) {
         self.pattern = pattern
         self.patternDescription = description
         self.createdAt = createdAt
         self.matchCount = matchCount
         self.isEnabled = isEnabled
+        self.blocksCalls = blocksCalls
     }
     
     /// Record that this pattern matched a call
@@ -51,67 +52,41 @@ final class BlockPattern {
 // MARK: - Pattern Matching
 
 extension BlockPattern {
-    /// Check if a phone number matches this pattern
-    /// - Parameter phoneNumber: The phone number to check (should be in E.164 format)
-    /// - Returns: True if the number matches the pattern
+    static let maxWildcards = 6
+    static let maxTotalNumbers: Int64 = 2_000_000
+
+    static func normalize(_ raw: String) -> String? {
+        let allowed: Set<Character> = ["+", " ", "-", "(", ")", "#"]
+        guard raw.allSatisfy({ ($0.isASCII && $0.isNumber) || allowed.contains($0) }) else { return nil }
+        let cleaned = raw.filter { ($0.isASCII && $0.isNumber) || $0 == "#" }
+        guard let first = cleaned.first, first != "#", (7...15).contains(cleaned.count) else { return nil }
+        let wildcards = cleaned.filter { $0 == "#" }.count
+        guard (1...maxWildcards).contains(wildcards) else { return nil }
+        return cleaned
+    }
+
+    static func wildcardCount(in raw: String) -> Int {
+        raw.filter { $0 == "#" }.count
+    }
+
+    static func expandedCount(of raw: String) -> Int64 {
+        var total: Int64 = 1
+        for _ in 0..<wildcardCount(in: raw) {
+            total *= 10
+        }
+        return total
+    }
+
+    var expandedCount: Int64 {
+        BlockPattern.expandedCount(of: pattern)
+    }
+
     func matches(_ phoneNumber: String) -> Bool {
         guard isEnabled else { return false }
-        
-        // Normalize the phone number
-        let normalizedNumber = phoneNumber.replacingOccurrences(of: "+", with: "")
-            .filter { $0.isNumber }
-        
-        // Normalize the pattern
-        let normalizedPattern = pattern.replacingOccurrences(of: "+", with: "")
-            .filter { $0.isNumber || $0 == "*" }
-        
-        return matchesPattern(number: normalizedNumber, pattern: normalizedPattern)
-    }
-    
-    /// Internal pattern matching logic
-    private func matchesPattern(number: String, pattern: String) -> Bool {
-        var numberIndex = number.startIndex
-        var patternIndex = pattern.startIndex
-        
-        while patternIndex < pattern.endIndex {
-            let patternChar = pattern[patternIndex]
-            
-            if patternChar == "*" {
-                // Wildcard matches any remaining characters
-                // Check if this is the last character in the pattern
-                let nextPatternIndex = pattern.index(after: patternIndex)
-                if nextPatternIndex == pattern.endIndex {
-                    return true // * at end matches everything
-                }
-                
-                // Try to match the rest of the pattern from each position
-                while numberIndex <= number.endIndex {
-                    if matchesPattern(
-                        number: String(number[numberIndex...]),
-                        pattern: String(pattern[nextPatternIndex...])
-                    ) {
-                        return true
-                    }
-                    if numberIndex < number.endIndex {
-                        numberIndex = number.index(after: numberIndex)
-                    } else {
-                        break
-                    }
-                }
-                return false
-            } else {
-                // Must match exactly
-                if numberIndex >= number.endIndex || number[numberIndex] != patternChar {
-                    return false
-                }
-                numberIndex = number.index(after: numberIndex)
-            }
-            
-            patternIndex = pattern.index(after: patternIndex)
-        }
-        
-        // Pattern exhausted, number should also be exhausted
-        return numberIndex == number.endIndex
+        let number = phoneNumber.filter { $0.isASCII && $0.isNumber }
+        let template = pattern.filter { ($0.isASCII && $0.isNumber) || $0 == "#" }
+        guard number.count == template.count else { return false }
+        return zip(number, template).allSatisfy { $1 == "#" || $0 == $1 }
     }
 }
 
@@ -119,13 +94,5 @@ extension BlockPattern {
 
 extension BlockPattern {
     /// Common patterns that users might want to use
-    static let commonPatterns: [(pattern: String, description: String)] = [
-        ("+1800*", "Toll-free 1-800 numbers"),
-        ("+1888*", "Toll-free 1-888 numbers"),
-        ("+1877*", "Toll-free 1-877 numbers"),
-        ("+1866*", "Toll-free 1-866 numbers"),
-        ("+1855*", "Toll-free 1-855 numbers"),
-        ("+1844*", "Toll-free 1-844 numbers"),
-        ("+1900*", "Premium rate 1-900 numbers"),
-    ]
+    static let commonPatterns: [(pattern: String, description: String)] = []
 }
